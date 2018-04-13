@@ -21,6 +21,11 @@ enum JournalOperation<T> {
 	Delete,
 }
 
+// JournalSlice wraps a normal [u8] slice and allow viewing of the underlying `Mmap`. Both are Send and Sync, so the
+// marker here are safe.
+unsafe impl Send for JournalSlice { }
+unsafe impl Sync for JournalSlice { }
+
 /// Unsafe view onto memmap file memory which backs journal.
 #[derive(Debug)]
 struct JournalSlice {
