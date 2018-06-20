@@ -68,6 +68,7 @@ extern crate matches;
 #[cfg(test)]
 #[macro_use]
 extern crate quickcheck;
+extern crate tempfile;
 
 mod collision;
 mod database;

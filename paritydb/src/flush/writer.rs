@@ -158,8 +158,14 @@ impl<'op, 'db, I: Iterator<Item = Operation<'op>>> OperationWriter<'db, I> {
 			self.spaces.move_offset_forward(prefixed_key.offset(self.field_body_size));
 		}
 
-		let space = self.spaces.peek().expect("TODO: db end?")?;
-		let d = decision(operation, space, self.shift, self.field_body_size, self.prefix_bits);
+		let space = self.spaces.peek().ok_or(::error::ErrorKind::OutOfMemory)??;
+		let d = decision(
+			operation,
+			space,
+			self.shift,
+			self.field_body_size,
+			self.prefix_bits,
+		);
 		match d {
 			Decision::InsertOperationIntoEmptySpace { key, value, offset, space_len } => {
 				// advance iterators

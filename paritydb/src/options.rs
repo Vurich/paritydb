@@ -3,7 +3,7 @@ use field;
 use record;
 
 /// A length of values stored in the DB.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum ValuesLen {
 	/// Values have constant length.
 	Constant(usize),
@@ -12,7 +12,7 @@ pub enum ValuesLen {
 		/// Expected size of the values.
 		/// Overestimating the size will result in a bigger database file.
 		/// Underestimating it will cause large number of collisions.
-		expected: usize
+		expected: usize,
 	},
 }
 
@@ -41,7 +41,7 @@ impl ValuesLen {
 }
 
 /// Database options.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Options {
 	/// Number of eras to keep in the journal.
 	pub journal_eras: usize,
@@ -85,13 +85,20 @@ impl InternalOptions {
 		if external.extend_threshold_percent > 100 || external.extend_threshold_percent == 0 {
 			bail!(ErrorKind::InvalidOptions(
 				"extend_threshold_percent",
-				format!("Not satisfied: 0 < {} <= 100", external.extend_threshold_percent)
+				format!(
+					"Not satisfied: 0 < {} <= 100",
+					external.extend_threshold_percent
+				)
 			));
 		}
 		if external.key_index_bits as usize > external.key_len * 8 {
 			bail!(ErrorKind::InvalidOptions(
 				"key_index_bits",
-				format!("{} is greater than key length: {}", external.key_index_bits, external.key_len * 8)
+				format!(
+					"{} is greater than key length: {}",
+					external.key_index_bits,
+					external.key_len * 8
+				)
 			));
 		}
 
@@ -112,7 +119,10 @@ impl InternalOptions {
 		if external.key_index_bits > 32 {
 			bail!(ErrorKind::InvalidOptions(
 				"key_index_bits",
-				format!("{} is too large. Only prefixes up to 32 bits are supported.", external.key_index_bits)
+				format!(
+					"{} is too large. Only prefixes up to 32 bits are supported.",
+					external.key_index_bits
+				)
 			));
 		}
 

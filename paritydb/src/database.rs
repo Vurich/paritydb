@@ -91,6 +91,45 @@ impl Database {
 	const META_FILE: &'static str = "meta.db";
 	const LOCK_FILE: &'static str = "LOCK";
 
+	fn new_expanded(&self) -> Result<Self> {
+		// TODO: What's a good value for this number?
+		const MAX_JOURNAL_SIZE: usize = 2048;
+
+		let mut new_empty_db = Database::create(
+			::tempfile::tempdir()?.into_path(),
+			Options {
+				key_index_bits: self.options.external.key_index_bits + 1,
+				..self.options.external.clone()
+			},
+		)?;
+
+		for chunk in &self.iter()?.chunks(MAX_JOURNAL_SIZE) {
+			let mut transaction = new_empty_db.create_transaction();
+
+			for item in chunk {
+				let (key, val) = item?;
+				transaction.insert(key, val.to_vec())?;
+			}
+
+			new_empty_db.commit(&transaction)?;
+			// TODO: Should we fail if we end up doing this recursively somehow?
+			new_empty_db.flush_journal(None)?;
+		}
+
+		Ok(new_empty_db)
+	}
+
+	fn swap(&mut self, mut other: Database) -> Result<()> {
+		use std::{fs, mem};
+
+		fs::rename(&other.path, &self.path)?;
+
+		mem::swap(&mut self.path, &mut other.path);
+		mem::swap(self, &mut other);
+
+		Ok(())
+	}
+
 	fn acquire_lock_file<P: AsRef<Path>>(path: P) -> Result<File> {
 		let lock_file_path = path.as_ref().join(Self::LOCK_FILE);
 		let lock_file = fs::OpenOptions::new()
@@ -197,58 +236,88 @@ impl Database {
 
 	/// Flushes up to `max` excessive journal eras to the disk.
 	pub fn flush_journal<T: Into<Option<usize>>>(&mut self, max: T) -> Result<()> {
-		let len = self.journal.len();
-		let max = max.into().unwrap_or(len);
+		let still_to_flush = {
+			let len = self.journal.len();
+			let max = max.into().unwrap_or(len);
 
-		if len < self.options.external.journal_eras {
-			return Ok(())
-		}
+			if len < self.options.external.journal_eras {
+				return Ok(());
+			}
 
-		let to_flush = cmp::min(len - self.options.external.journal_eras, max);
+			let to_flush = cmp::min(len - self.options.external.journal_eras, max);
 
-		let prefix_bits = self.options.external.key_index_bits;
-		let collisions = &mut self.collisions;
+			let prefix_bits = self.options.external.key_index_bits;
 
-		for era in self.journal.drain_front(to_flush) {
-			let flush = {
-				let collided_prefixes = &self.metadata.collided_prefixes;
+			let mut iterator = self.journal.drain_front(to_flush);
 
-				// partition operations by whether they affect collided prefixes
-				let (collided_operations, operations): (Vec<_>, Vec<_>) =
-					era.iter().partition(|op| {
-						let key = Key::new(op.key(), prefix_bits);
-						collided_prefixes.has(key.prefix).unwrap_or(false)
-					});
+			let mut number_flushed = 0;
 
-				// flush operations for collided prefixes to their own collision file
-				for op in collided_operations {
-					let key = Key::new(op.key(), prefix_bits);
-					let collision = collisions.get_mut(&key.prefix).expect(
-						"prefix is declared as collided; \
-						 collision file should exist in collisions index; qed");
+			loop {
+				if let Some(era) = iterator.next() {
+					let flush = {
+						let collided_prefixes = &self.metadata.collided_prefixes;
 
-					collision.apply(op)?;
+						// partition operations by whether they affect collided prefixes
+						let (collided_operations, operations): (
+							Vec<_>,
+							Vec<_>,
+						) = era.iter().partition(|op| {
+							let key = Key::new(op.key(), prefix_bits);
+							collided_prefixes.has(key.prefix).unwrap_or(false)
+						});
+
+						// flush operations for collided prefixes to their own collision file
+						for op in collided_operations {
+							let key = Key::new(op.key(), prefix_bits);
+							let collision = self.collisions.get_mut(&key.prefix).expect(
+								"prefix is declared as collided; \
+								 collision file should exist in collisions index; qed",
+							);
+
+							collision.apply(op)?;
+						}
+
+						// create flush to data file for everything else
+						match Flush::new(
+							&self.path,
+							&self.options,
+							unsafe { self.mmap.as_slice() },
+							&self.metadata,
+							operations.into_iter(),
+						) {
+							Ok(flush) => flush,
+							Err(ref err) if err.kind() == &::error::ErrorKind::OutOfMemory => {
+								break Some(to_flush - number_flushed);
+							}
+							Err(other) => return Err(other),
+						}
+					};
+
+					era.delete()?;
+
+					// TODO: metadata should be a single structure
+					// updating self.metadata should happen after all calls
+					// which may fail ("?")
+					flush.flush(
+						unsafe { self.mmap.as_mut_slice() },
+						unsafe { self.metadata_mmap.as_mut_slice() },
+						&mut self.metadata,
+					);
+					self.mmap.flush()?;
+					self.metadata_mmap.flush()?;
+					flush.delete()?;
+
+					number_flushed += 1;
+				} else {
+					break None;
 				}
+			}
+		};
 
-				// create flush to data file for everything else
-				Flush::new(
-					&self.path,
-					&self.options,
-					unsafe { self.mmap.as_slice() },
-					&self.metadata,
-					operations.into_iter(),
-				)?
-			};
-
-			era.delete()?;
-
-			// TODO: metadata should be a single structure
-			// updating self.metadata should happen after all calls
-			// which may fail ("?")
-			flush.flush(unsafe { self.mmap.as_mut_slice() }, unsafe { self.metadata_mmap.as_mut_slice() }, &mut self.metadata);
-			self.mmap.flush()?;
-			self.metadata_mmap.flush()?;
-			flush.delete()?;
+		if let Some(remaining) = still_to_flush {
+			let new_db = self.new_expanded()?;
+			self.swap(new_db)?;
+			self.flush_journal(remaining)?;
 		}
 
 		Ok(())

@@ -47,6 +47,9 @@ error_chain! {
 					 If you're sure that no other process is using \
 					 the database you can delete this file.", path.display()),
 		}
+		OutOfMemory {
+			description("Out of memory")
+		}
 	}
 }
 
