@@ -48,7 +48,7 @@ fn run_actions(db: &mut Database, actions: &[Action]) {
 }
 
 macro_rules! db_test {
-	($name: tt, $($actions: expr),*) => {
+	($name: tt, $($actions: expr),*$(,)*) => {
 		#[test]
 		fn $name() {
 			let temp = TempDir::new(stringify!($name)).unwrap();
@@ -63,6 +63,53 @@ macro_rules! db_test {
 			run_actions(&mut db, &[$($actions),*]);
 		}
 	}
+}
+
+
+#[test]
+fn db_database_resize()	{
+	let temp = TempDir::new("db_database_resize").unwrap();
+
+	let mut db = Database::create(temp.path(), Options {
+		journal_eras: 0,
+		key_len: 3,
+		value_len: ValuesLen::Constant(3),
+		key_index_bits: 3,
+		..Default::default()
+	}).unwrap();
+
+	run_actions(
+		&mut db,
+		&[
+			Insert("aaa", "001"),
+			Insert("aab", "002"),
+			Insert("aac", "003"),
+			Insert("aad", "004"),
+			Insert("aae", "005"),
+			Insert("aaf", "006"),
+			CommitAndFlush,
+			Insert("baa", "007"),
+			Insert("bab", "008"),
+			Insert("bac", "009"),
+			// Should resize here
+			Insert("bad", "010"),
+			Insert("bae", "011"),
+			Insert("baf", "012"),
+			CommitAndFlush,
+			AssertEqual("aaa", "001"),
+			AssertEqual("aab", "002"),
+			AssertEqual("aac", "003"),
+			AssertEqual("aad", "004"),
+			AssertEqual("aae", "005"),
+			AssertEqual("aaf", "006"),
+			AssertEqual("baa", "007"),
+			AssertEqual("bab", "008"),
+			AssertEqual("bac", "009"),
+			AssertEqual("bad", "010"),
+			AssertEqual("bae", "011"),
+			AssertEqual("baf", "012"),
+		],
+	);
 }
 
 db_test!(

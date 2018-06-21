@@ -122,6 +122,7 @@ impl Database {
 	fn swap(&mut self, mut other: Database) -> Result<()> {
 		use std::{fs, mem};
 
+		fs::remove_dir_all(&self.path)?;
 		fs::rename(&other.path, &self.path)?;
 
 		mem::swap(&mut self.path, &mut other.path);
@@ -234,22 +235,39 @@ impl Database {
 		Ok(())
 	}
 
+	fn size_without_collisions(&self) -> u64 {
+		2_u64.pow(self.options.external.key_index_bits as u32) * self.options.external.value_len.size() as u64
+	}
+
+	fn max_bytes_before_resize(&self) -> u64 {
+		let out =
+			self.size_without_collisions() as f64 *
+				(self.options.external.extend_threshold_percent as f64 / 100.0);
+		out as u64
+	}
+
 	/// Flushes up to `max` excessive journal eras to the disk.
 	pub fn flush_journal<T: Into<Option<usize>>>(&mut self, max: T) -> Result<()> {
-		let still_to_flush = {
-			let len = self.journal.len();
-			let max = max.into().unwrap_or(len);
+		let len = self.journal.len();
+		let max = max.into().unwrap_or(len);
+		let (bytes_used, max_bytes_before_resize) =
+			(self.metadata.occupied_bytes, self.max_bytes_before_resize());
 
-			if len < self.options.external.journal_eras {
-				return Ok(());
-			}
+				if len < self.options.external.journal_eras {
+			return Ok(());
+		}
 
-			let to_flush = cmp::min(len - self.options.external.journal_eras, max);
+		let to_flush = cmp::min(len - self.options.external.journal_eras, max);
 
+		// TODO: Load detection works only at the granularity of a flush right now. This means
+		// that if you do a flush that takes up >20% of the total space in the database you
+		// could get very bad performance until the next flush.
+		let still_to_flush = if bytes_used > max_bytes_before_resize {
+			Some(to_flush)
+		} else {
 			let prefix_bits = self.options.external.key_index_bits;
 
 			let mut iterator = self.journal.drain_front(to_flush);
-
 			let mut number_flushed = 0;
 
 			loop {
@@ -303,11 +321,10 @@ impl Database {
 						unsafe { self.metadata_mmap.as_mut_slice() },
 						&mut self.metadata,
 					);
+
 					self.mmap.flush()?;
 					self.metadata_mmap.flush()?;
 					flush.delete()?;
-
-					number_flushed += 1;
 				} else {
 					break None;
 				}
